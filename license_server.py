@@ -6,18 +6,22 @@ from flask import Flask, request, jsonify, redirect
 app = Flask(__name__)
 
 # ==============================
-# 🔐 SECURITY CONFIG
+# 🔐 CONFIG
 # ==============================
 SECRET_KEY = "my_super_secret_123"
 ADMIN_PASSWORD = "admin123"
 
+DB_FILE = "licenses.db"
+
+
 # ==============================
-# 🗄️ DATABASE INIT
+# 🗄️ DATABASE INIT (SAFE FIX)
 # ==============================
 def init_db():
-    conn = sqlite3.connect("licenses.db")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
+    # Create table if not exists
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS licenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,10 +32,27 @@ def init_db():
     )
     """)
 
+    # ✅ Ensure required columns exist (fix old DB)
+    cursor.execute("PRAGMA table_info(licenses)")
+    columns = [col[1] for col in cursor.fetchall()]
+
+    required_columns = {
+        "license_key": "TEXT",
+        "created_at": "TEXT",
+        "expiry_date": "TEXT",
+        "status": "TEXT"
+    }
+
+    for col, col_type in required_columns.items():
+        if col not in columns:
+            cursor.execute(f"ALTER TABLE licenses ADD COLUMN {col} {col_type}")
+
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 # ==============================
 # 🔑 GENERATE LICENSE (API)
@@ -53,7 +74,7 @@ def generate_license():
     created_at = datetime.now()
     expiry_date = created_at + timedelta(days=days)
 
-    conn = sqlite3.connect("licenses.db")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -91,7 +112,7 @@ def verify_license():
 
     license_key = data["license_key"]
 
-    conn = sqlite3.connect("licenses.db")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -149,7 +170,7 @@ def admin_login():
 @app.route("/dashboard")
 def dashboard():
 
-    conn = sqlite3.connect("licenses.db")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT license_key, expiry_date, status FROM licenses")
     data = cursor.fetchall()
@@ -206,7 +227,7 @@ def create_license_ui():
     created = datetime.now()
     expiry = created + timedelta(days=days)
 
-    conn = sqlite3.connect("licenses.db")
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
     cursor.execute("""
