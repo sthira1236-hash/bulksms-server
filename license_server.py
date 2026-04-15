@@ -1,159 +1,134 @@
 from flask import Flask, request, jsonify
 import sqlite3
-import datetime
-import hashlib
+import uuid
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-DB_FILE = "licenses.db"
-
-# =========================
-# DATABASE INIT
-# =========================
+# ==============================
+# DATABASE INIT (FIXED VERSION)
+# ==============================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
+
+    # Drop old table (fix structure issue)
+    cursor.execute("DROP TABLE IF EXISTS licenses")
+
+    # Create new table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS licenses (
+    CREATE TABLE licenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        license_key TEXT UNIQUE,
+        license_key TEXT,
         created_at TEXT,
         expiry_date TEXT,
         status TEXT
     )
     """)
+
     conn.commit()
     conn.close()
 
+# Run DB setup on start
 init_db()
 
-# =========================
-# HOME ROUTE (IMPORTANT)
-# =========================
-@app.route("/")
-def home():
-    return "License Server Running ✅"
-
-# =========================
-# GENERATE LICENSE
-# =========================
-@app.route("/generate", methods=["POST"])
+# ==============================
+# GENERATE LICENSE API
+# ==============================
+@app.route('/generate', methods=['POST'])
 def generate_license():
-    data = request.json
+    data = request.get_json()
+
     days = data.get("days", 30)
 
-    # Generate unique license
-    raw = str(datetime.datetime.now()) + str(days)
-    license_key = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    license_key = str(uuid.uuid4()).upper()
+    created_at = datetime.now()
+    expiry_date = created_at + timedelta(days=days)
 
-    created_at = datetime.datetime.now()
-    expiry_date = created_at + datetime.timedelta(days=days)
-
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
 
     cursor.execute("""
-    INSERT INTO licenses (license_key, created_at, expiry_date, status)
-    VALUES (?, ?, ?, ?)
-    """, (license_key, created_at, expiry_date, "active"))
+        INSERT INTO licenses (license_key, created_at, expiry_date, status)
+        VALUES (?, ?, ?, ?)
+    """, (
+        license_key,
+        created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        expiry_date.strftime("%Y-%m-%d %H:%M:%S"),
+        "active"
+    ))
 
     conn.commit()
     conn.close()
 
     return jsonify({
         "license_key": license_key,
-        "expiry_date": str(expiry_date)
+        "expiry_date": expiry_date.strftime("%Y-%m-%d")
     })
 
-# =========================
-# VERIFY LICENSE
-# =========================
-@app.route("/verify", methods=["POST"])
+
+# ==============================
+# VERIFY LICENSE API
+# ==============================
+@app.route('/verify', methods=['POST'])
 def verify_license():
-    data = request.json
+    data = request.get_json()
     license_key = data.get("license_key")
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT expiry_date, status FROM licenses WHERE license_key=?", (license_key,))
-    result = cursor.fetchone()
+    cursor.execute("""
+        SELECT expiry_date, status FROM licenses WHERE license_key=?
+    """, (license_key,))
 
+    result = cursor.fetchone()
     conn.close()
 
     if not result:
         return jsonify({"status": "invalid"})
 
-    expiry_date, status = result
-    expiry_date = datetime.datetime.fromisoformat(expiry_date)
+    expiry_date_str, status = result
+    expiry_date = datetime.strptime(expiry_date_str, "%Y-%m-%d %H:%M:%S")
 
     if status != "active":
-        return jsonify({"status": "blocked"})
+        return jsonify({"status": "inactive"})
 
-    if datetime.datetime.now() > expiry_date:
+    if datetime.now() > expiry_date:
         return jsonify({"status": "expired"})
 
-    return jsonify({"status": "valid"})
+    return jsonify({
+        "status": "valid",
+        "expiry_date": expiry_date.strftime("%Y-%m-%d")
+    })
 
-# =========================
-# ADMIN LOGIN (BASIC)
-# =========================
-ADMIN_USER = "admin"
-ADMIN_PASS = "1234"  # change later
 
-@app.route("/admin/login", methods=["POST"])
-def admin_login():
-    data = request.json
-    username = data.get("username")
-    password = data.get("password")
-
-    if username == ADMIN_USER and password == ADMIN_PASS:
-        return jsonify({"status": "success"})
-    else:
-        return jsonify({"status": "failed"}), 401
-
-# =========================
-# LIST LICENSES (ADMIN)
-# =========================
-@app.route("/admin/licenses", methods=["GET"])
-def list_licenses():
-    conn = sqlite3.connect(DB_FILE)
+# ==============================
+# ADMIN VIEW (OPTIONAL)
+# ==============================
+@app.route('/admin/licenses', methods=['GET'])
+def get_licenses():
+    conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT license_key, expiry_date, status FROM licenses")
-    data = cursor.fetchall()
+    cursor.execute("SELECT * FROM licenses")
+    rows = cursor.fetchall()
 
     conn.close()
 
-    licenses = []
-    for row in data:
-        licenses.append({
-            "license_key": row[0],
-            "expiry_date": row[1],
-            "status": row[2]
-        })
+    return jsonify(rows)
 
-    return jsonify(licenses)
 
-# =========================
-# BLOCK LICENSE (ADMIN)
-# =========================
-@app.route("/admin/block", methods=["POST"])
-def block_license():
-    data = request.json
-    license_key = data.get("license_key")
+# ==============================
+# ROOT CHECK
+# ==============================
+@app.route('/')
+def home():
+    return "License Server Running ✅"
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
 
-    cursor.execute("UPDATE licenses SET status='blocked' WHERE license_key=?", (license_key,))
-    conn.commit()
-    conn.close()
-
-    return jsonify({"status": "blocked"})
-
-# =========================
-# RUN LOCAL (NOT USED IN RENDER)
-# =========================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+# ==============================
+# RUN (LOCAL ONLY)
+# ==============================
+if __name__ == '__main__':
+    app.run(debug=True)
