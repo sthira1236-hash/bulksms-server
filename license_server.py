@@ -1,27 +1,20 @@
+from flask import Flask, request, jsonify, redirect
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, redirect
 
 app = Flask(__name__)
 
-# ==============================
-# 🔐 CONFIG
-# ==============================
-SECRET_KEY = "my_super_secret_123"
-ADMIN_PASSWORD = "admin123"
-
+# ================= CONFIG =================
 DB_FILE = "licenses.db"
+SECRET_KEY = "my_super_secret_123"
+ADMIN_PASSWORD = "admin123"   # change this!
 
-
-# ==============================
-# 🗄️ DATABASE INIT (SAFE FIX)
-# ==============================
+# ================= DB INIT =================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # Create table if not exists
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS licenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,47 +25,31 @@ def init_db():
     )
     """)
 
-    # ✅ Ensure required columns exist (fix old DB)
-    cursor.execute("PRAGMA table_info(licenses)")
-    columns = [col[1] for col in cursor.fetchall()]
-
-    required_columns = {
-        "license_key": "TEXT",
-        "created_at": "TEXT",
-        "expiry_date": "TEXT",
-        "status": "TEXT"
-    }
-
-    for col, col_type in required_columns.items():
-        if col not in columns:
-            cursor.execute(f"ALTER TABLE licenses ADD COLUMN {col} {col_type}")
-
     conn.commit()
     conn.close()
 
-
 init_db()
 
+# ================= API =================
 
-# ==============================
-# 🔑 GENERATE LICENSE (API)
-# ==============================
+@app.route("/")
+def home():
+    return "License Server Running ✅"
+
+
 @app.route("/generate", methods=["POST"])
 def generate_license():
 
+    # 🔒 PROTECTION
     if request.headers.get("x-api-key") != SECRET_KEY:
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json()
-
-    if not data or "days" not in data:
-        return jsonify({"error": "Days required"}), 400
-
-    days = int(data["days"])
+    days = int(data.get("days", 30))
 
     license_key = str(uuid.uuid4()).upper()
-    created_at = datetime.now()
-    expiry_date = created_at + timedelta(days=days)
+    created = datetime.now()
+    expiry = created + timedelta(days=days)
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -82,8 +59,8 @@ def generate_license():
     VALUES (?, ?, ?, ?)
     """, (
         license_key,
-        created_at.strftime("%Y-%m-%d"),
-        expiry_date.strftime("%Y-%m-%d"),
+        created.strftime("%Y-%m-%d"),
+        expiry.strftime("%Y-%m-%d"),
         "active"
     ))
 
@@ -92,56 +69,49 @@ def generate_license():
 
     return jsonify({
         "license_key": license_key,
-        "expiry_date": expiry_date.strftime("%Y-%m-%d")
+        "expiry_date": expiry.strftime("%Y-%m-%d")
     })
 
 
-# ==============================
-# ✅ VERIFY LICENSE (API)
-# ==============================
 @app.route("/verify", methods=["POST"])
-def verify_license():
+def verify():
 
+    # 🔒 PROTECTION
     if request.headers.get("x-api-key") != SECRET_KEY:
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json()
-
-    if not data or "license_key" not in data:
-        return jsonify({"error": "License key required"}), 400
-
-    license_key = data["license_key"]
+    key = data.get("license_key")
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
     cursor.execute("""
-    SELECT expiry_date, status FROM licenses WHERE license_key = ?
-    """, (license_key,))
-
+    SELECT expiry_date, status FROM licenses WHERE license_key=?
+    """, (key,))
     row = cursor.fetchone()
     conn.close()
 
     if not row:
         return jsonify({"status": "invalid"})
 
-    expiry_date, status = row
+    expiry_date = datetime.strptime(row[0], "%Y-%m-%d")
+    status = row[1]
 
     if status != "active":
-        return jsonify({"status": "inactive"})
+        return jsonify({"status": "invalid"})
 
-    if datetime.strptime(expiry_date, "%Y-%m-%d") < datetime.now():
+    if datetime.now() > expiry_date:
         return jsonify({"status": "expired"})
 
     return jsonify({
         "status": "valid",
-        "expiry_date": expiry_date
+        "expiry_date": row[0]
     })
 
 
-# ==============================
-# 🔐 ADMIN LOGIN
-# ==============================
+# ================= ADMIN LOGIN =================
+
 @app.route("/admin", methods=["GET", "POST"])
 def admin_login():
 
@@ -149,14 +119,36 @@ def admin_login():
         if request.form.get("password") == ADMIN_PASSWORD:
             return redirect("/dashboard")
         else:
-            return "❌ Wrong Password"
+            return "<h3 style='color:red;text-align:center;'>Wrong Password</h3>"
 
     return """
     <html>
-    <body style="text-align:center;margin-top:100px;font-family:Arial;">
-        <h2>🔐 Admin Login</h2>
+    <head>
+        <title>Admin Login</title>
+        <style>
+            body {
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                font-family: Arial;
+                color: white;
+                text-align: center;
+                margin-top: 150px;
+            }
+            input, button {
+                padding: 10px;
+                margin: 10px;
+                border: none;
+                border-radius: 5px;
+            }
+            button {
+                background: #00ffcc;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>🔐 Admin Login</h1>
         <form method="post">
-            <input type="password" name="password" placeholder="Enter Password"><br><br>
+            <input type="password" name="password" placeholder="Enter Password"><br>
             <button type="submit">Login</button>
         </form>
     </body>
@@ -164,9 +156,8 @@ def admin_login():
     """
 
 
-# ==============================
-# 📊 DASHBOARD
-# ==============================
+# ================= DASHBOARD =================
+
 @app.route("/dashboard")
 def dashboard():
 
@@ -178,46 +169,101 @@ def dashboard():
 
     rows = ""
     for d in data:
+        color = "#00ff88" if d[2] == "active" else "#ff4d4d"
+
         rows += f"""
         <tr>
             <td>{d[0]}</td>
             <td>{d[1]}</td>
-            <td>{d[2]}</td>
+            <td style='color:{color};font-weight:bold;'>{d[2]}</td>
+            <td><button onclick="copyKey('{d[0]}')">Copy</button></td>
         </tr>
         """
 
     return f"""
     <html>
-    <body style="font-family:Arial;padding:20px;">
-    
-    <h2>🚀 License Dashboard</h2>
+    <head>
+        <title>Dashboard</title>
+        <style>
+            body {{
+                background: #0f172a;
+                color: white;
+                font-family: Arial;
+                padding: 20px;
+            }}
+            h1 {{ color: #00ffcc; }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }}
+            th, td {{
+                padding: 12px;
+                border-bottom: 1px solid #333;
+            }}
+            th {{ background: #1e293b; }}
+            tr:hover {{ background: #1e293b; }}
+            button {{
+                padding: 6px 12px;
+                border-radius: 5px;
+                border: none;
+                background: #00ffcc;
+                cursor: pointer;
+            }}
+            .card {{
+                background: #1e293b;
+                padding: 20px;
+                border-radius: 10px;
+                margin-top: 20px;
+            }}
+            input {{
+                padding: 8px;
+                border-radius: 5px;
+                border: none;
+                margin-right: 10px;
+            }}
+        </style>
 
-    <h3>Create License</h3>
-    <form method="post" action="/create_license_ui">
-        Days: <input name="days" value="30"><br><br>
-        <button type="submit">Generate</button>
-    </form>
+        <script>
+            function copyKey(key) {{
+                navigator.clipboard.writeText(key);
+                alert("Copied: " + key);
+            }}
+        </script>
+    </head>
 
-    <hr>
+    <body>
 
-    <h3>All Licenses</h3>
-    <table border="1" cellpadding="10">
-        <tr>
-            <th>License Key</th>
-            <th>Expiry</th>
-            <th>Status</th>
-        </tr>
-        {rows}
-    </table>
+    <h1>🚀 License Dashboard</h1>
+
+    <div class="card">
+        <h3>Create License</h3>
+        <form method="post" action="/create_license_ui">
+            <input name="days" placeholder="Days (30)">
+            <button type="submit">Generate</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3>All Licenses</h3>
+        <table>
+            <tr>
+                <th>License Key</th>
+                <th>Expiry</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+            {rows}
+        </table>
+    </div>
 
     </body>
     </html>
     """
 
 
-# ==============================
-# 🧾 CREATE LICENSE FROM UI
-# ==============================
+# ================= CREATE LICENSE UI =================
+
 @app.route("/create_license_ui", methods=["POST"])
 def create_license_ui():
 
@@ -244,22 +290,17 @@ def create_license_ui():
     conn.close()
 
     return f"""
-    <h3>✅ License Created</h3>
-    <p><b>{license_key}</b></p>
-    <a href="/dashboard">Back</a>
+    <html>
+    <body style="background:#0f172a;color:white;text-align:center;padding-top:100px;">
+        <h2>✅ License Generated</h2>
+        <h3 style="color:#00ffcc;">{license_key}</h3>
+        <a href="/dashboard" style="color:white;">⬅ Back</a>
+    </body>
+    </html>
     """
 
 
-# ==============================
-# 🟢 HOME
-# ==============================
-@app.route("/")
-def home():
-    return "License Server Running ✅"
+# ================= RUN =================
 
-
-# ==============================
-# 🚀 RUN
-# ==============================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True)
